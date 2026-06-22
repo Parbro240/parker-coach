@@ -763,25 +763,56 @@ async function testCorosLogin(){
 }
 
 // ── API ──
-// ── ICU fetch via Netlify function (fast, <2s, no timeout issue) ──
+// ── ICU fetch DIRECTLY from browser — /api/v1/ endpoints support CORS ──
 async function callICU(body){
   const p=getP();
-  const payload={...body, apiKey: p.icuKey};
-  const res=await fetch('/.netlify/functions/coach',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  const data=await res.json();
-  if(!res.ok) throw new Error(data.error||`ICU Error ${res.status}`);
-  return data;
+  const { athleteId, oldest, newest } = body;
+  const auth = btoa('API_KEY:' + p.icuKey);
+  const hdrs = { 'Authorization': 'Basic ' + auth, 'Accept': 'application/json' };
+  try {
+    const [wRes, aRes] = await Promise.all([
+      fetch(`https://intervals.icu/api/v1/athlete/${athleteId}/wellness?oldest=${oldest}&newest=${newest}`, { headers: hdrs }),
+      fetch(`https://intervals.icu/api/v1/athlete/${athleteId}/activities?oldest=${oldest}&limit=50`, { headers: hdrs })
+    ]);
+    if (wRes.status === 401 || wRes.status === 403) throw new Error('Invalid Intervals.icu API key — update in Settings');
+    if (wRes.status === 404) throw new Error('Athlete ID not found — check Settings');
+    if (!wRes.ok) throw new Error('Intervals.icu error: ' + wRes.status);
+    const wellness = await wRes.json().catch(() => []);
+    const activities = await aRes.json().catch(() => []);
+    return {
+      wellness: Array.isArray(wellness) ? wellness : [],
+      activities: Array.isArray(activities) ? activities : []
+    };
+  } catch(e) {
+    if (e.message.includes('fetch')) throw new Error('Cannot reach Intervals.icu — check your internet connection');
+    throw e;
+  }
 }
 
-// ── Coros via Netlify function ──
+// ── Coros calls — these need a server proxy for CORS.
+// On GitHub Pages we show a helpful message instead of crashing.
 async function callCoach(body){
   const p=getP();
-  const payload={...body};
-  if(!payload.antKey&&p.antKey) payload.antKey=p.antKey;
-  const res=await fetch('/.netlify/functions/coach',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  const data=await res.json();
-  if(!res.ok) throw new Error(data.error||`Error ${res.status}`);
-  return data;
+  // Check if we have a Netlify function available
+  // On GitHub Pages /.netlify/functions/coach will 404 — catch it gracefully
+  try {
+    const payload={...body};
+    if(!payload.antKey&&p.antKey) payload.antKey=p.antKey;
+    const res=await fetch('/.netlify/functions/coach',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    // If we got HTML back (GitHub Pages 404), throw a clear error
+    const contentType=res.headers.get('content-type')||'';
+    if(!contentType.includes('application/json')){
+      throw new Error('COROS_NO_SERVER');
+    }
+    const data=await res.json();
+    if(!res.ok) throw new Error(data.error||`Error ${res.status}`);
+    return data;
+  } catch(e) {
+    if(e.message==='COROS_NO_SERVER' || e.message.includes('Unexpected token') || e.message.includes('JSON')){
+      throw new Error('Coros watch push requires a server. This feature is not available on GitHub Pages. Your briefings, chat, and activity data all work fine without it.');
+    }
+    throw e;
+  }
 }
 
 // ── Claude called DIRECTLY from browser — bypasses Netlify timeout completely ──
